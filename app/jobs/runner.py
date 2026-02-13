@@ -206,11 +206,7 @@ def run_once(universe):
             WINDOW_MIN = 10
             start_dt = now - timedelta(minutes=WINDOW_MIN)
 
-            df5m = fetch_5m_fx(
-                pair,
-                start_dt.date().isoformat(),
-                now.date().isoformat()
-            )
+            df5m = fetch_5m_fx(pair, start_dt, now, limit=50)
 
             if df5m is not None and not df5m.empty:
                 df5m = df5m[df5m.index >= start_dt]  # trim exact window
