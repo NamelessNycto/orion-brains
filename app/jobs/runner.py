@@ -228,7 +228,7 @@ def run_once(universe):
                         send_telegram(f"❌ SL HIT {pos['id']}")
                         continue
 
-            df15 = fetch_15m_fx(pair, (now - timedelta(days=7)).date().isoformat(), now.date().isoformat())
+            df15 = fetch_15m_fx(pair, (now - timedelta(days=2)).date().isoformat(), now.date().isoformat())
 
             last15 = df15.index[-1].to_pydatetime()
 
@@ -264,7 +264,7 @@ def run_once(universe):
         # ENTRY
         # ====================================================
 
-        df15 = fetch_15m_fx(pair, (now - timedelta(days=7)).date().isoformat(), now.date().isoformat())
+        df15 = fetch_15m_fx(pair, (now - timedelta(days=4)).date().isoformat(), now.date().isoformat())
         df1h = fetch_1h_fx(pair, (now - timedelta(days=7)).date().isoformat(), now.date().isoformat())
 
         sig = call_trend_engine(pair, _df_to(df15), _df_to(df1h)).get("signal")
