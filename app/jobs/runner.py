@@ -155,7 +155,33 @@ def sync_tf(
 
     return True, new_last
 
+from app.db.candles import get_count, get_oldest_ts
 
+def backfill_if_needed(pair_ticker, pair_short, tf, fetch_fn, target, chunk_td: timedelta):
+    n = get_count(pair_short, tf)
+    if n >= target:
+        return False
+
+    oldest = get_oldest_ts(pair_short, tf)
+    if oldest is None:
+        return False  # pas bootstrap encore
+
+    end_dt = pd.Timestamp(oldest).to_pydatetime()
+    start_dt = end_dt - chunk_td
+
+    df = fetch_fn(pair_ticker, start_dt, end_dt)
+    if df is None or df.empty:
+        return False
+
+    # garder uniquement plus vieux que oldest (sinon doublons)
+    df = df[df.index < pd.Timestamp(oldest)]
+    if df.empty:
+        return False
+
+    upsert_candles(pair_short, tf, df)
+    trim_candles(pair_short, tf, target)
+    return True
+    
 # ============================================================
 # DB HELPERS (positions)
 # ============================================================
@@ -281,7 +307,8 @@ def run_once(universe):
         # 1) Sync candles to Neon (small calls)
         new_15m, last15 = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=450)
         new_1h,  last1h = sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=250)
-
+        backfill_if_needed(pair, pair_short, "15m", fetch_15m_fx, target=400, chunk_td=timedelta(days=1))
+        backfill_if_needed(pair, pair_short, "1h",  fetch_1h_fx,  target=200, chunk_td=timedelta(days=2))
         # If no new 15m candle -> nothing to do (fast cron)
         if not new_15m:
             out["pairs"][pair_short]["actions"].append("no_new_15m")
