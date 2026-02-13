@@ -45,7 +45,7 @@ def _load_df_from_neon(pair_short: str, tf: str, limit: int) -> pd.DataFrame:
       WHERE pair=%s AND tf=%s
       ORDER BY ts DESC
       LIMIT %s
-    """, (pair_short, tf, int(limit)), fetch=True) or []
+    """, (pair_short, tf, int(limit)) or []
 
     if not rows:
         return pd.DataFrame(columns=["open","high","low","close"])
@@ -279,8 +279,8 @@ def run_once(universe):
         out["pairs"][pair_short] = {"actions": []}
 
         # 1) Sync candles to Neon (small calls)
-        new_15m, last15 = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4)
-        new_1h,  last1h  = sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7)
+        new_15m, last15 = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=450)
+        new_1h,  last1h = sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=250)
 
         # If no new 15m candle -> nothing to do (fast cron)
         if not new_15m:
