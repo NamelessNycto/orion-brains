@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from app.core.config import settings
-from app.db.neon import query_one, exec_sql
-from app.db.candles import get_last_ts, set_last_ts, upsert_candles
+from app.db.neon import query_one, query_all, exec_sql
+from app.db.candles import get_last_ts, set_last_ts, upsert_candles, trim_candles
 from app.services.polygon import fetch_15m_fx, fetch_1h_fx
 from app.services.strategy_client import call_trend_engine
 from app.services.telegram import send_telegram
@@ -39,7 +39,7 @@ def _iso_date(dt: datetime) -> str:
     return dt.date().isoformat()
 
 def _load_df_from_neon(pair_short: str, tf: str, limit: int) -> pd.DataFrame:
-    rows = exec_sql("""
+    rows = query_all("""
       SELECT ts, open, high, low, close
       FROM candles
       WHERE pair=%s AND tf=%s
@@ -116,33 +116,44 @@ def is_pivot_high(df, i, k):
 # CANDLES SYNC (Polygon -> Neon)
 # ============================================================
 
-def sync_tf(pair_ticker: str, pair_short: str, tf: str, now: datetime, fetch_fn, bootstrap_days: int):
-    """
-    tf: "15m" or "1h"
-    fetch_fn: fetch_15m_fx / fetch_1h_fx
-    returns: (has_new, last_ts_after)
-    """
+def sync_tf(
+    pair_ticker: str,
+    pair_short: str,
+    tf: str,
+    now: datetime,
+    fetch_fn,
+    bootstrap_days: int,
+    keep: int,
+):
     last_ts = get_last_ts(pair_short, tf)
 
     if last_ts is None:
         start_dt = now - timedelta(days=bootstrap_days)
     else:
-        # buffer 1 day to be safe with Polygon ranges
-        start_dt = pd.Timestamp(last_ts).to_pydatetime() - timedelta(days=1)
+        # petit buffer (2h) pour éviter trous/retards
+        start_dt = pd.Timestamp(last_ts).to_pydatetime() - timedelta(hours=2)
 
-    df = fetch_fn(pair_ticker, _iso_date(start_dt), _iso_date(now))
+    # IMPORTANT: on passe datetime -> ton polygon.py convertit en ms
+    df = fetch_fn(pair_ticker, start_dt, now)
     if df is None or df.empty:
         return False, last_ts
 
-    # save in Neon
+    # garder seulement les bougies strictement nouvelles
+    if last_ts is not None:
+        df = df[df.index > pd.Timestamp(last_ts)]
+
+    if df.empty:
+        return False, last_ts
+
     upsert_candles(pair_short, tf, df)
 
     new_last = df.index[-1].to_pydatetime()
-    if last_ts is None or pd.Timestamp(new_last) > pd.Timestamp(last_ts):
-        set_last_ts(pair_short, tf, new_last)
-        return True, new_last
+    set_last_ts(pair_short, tf, new_last)
 
-    return False, last_ts
+    # “remplacer la plus ancienne par la nouvelle” = trim
+    trim_candles(pair_short, tf, keep)
+
+    return True, new_last
 
 
 # ============================================================
