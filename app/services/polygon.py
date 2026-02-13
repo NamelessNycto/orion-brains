@@ -50,3 +50,6 @@ def fetch_1h_fx(pair: str, start: str, end: str):
 
 def fetch_1m_fx(pair: str, start: str, end: str):
     return _fetch_agg(pair, 1, "minute", start, end, limit=50000)
+
+def fetch_5m_fx(pair: str, start: str, end: str):
+    return _fetch_agg(pair, 5, "minute", start, end, limit=50000)
