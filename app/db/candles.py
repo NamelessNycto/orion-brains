@@ -74,3 +74,23 @@ def load_candles(pair: str, tf: str, limit: int):
         }
         for r in rows
     ]
+
+def trim_candles(pair: str, tf: str, keep: int):
+    """
+    Keep only the most recent `keep` candles.
+    Deletes older rows.
+    """
+    exec_sql(
+        """
+        DELETE FROM candles
+        WHERE pair=%s
+        AND tf=%s
+        AND ts NOT IN (
+            SELECT ts FROM candles
+            WHERE pair=%s AND tf=%s
+            ORDER BY ts DESC
+            LIMIT %s
+        )
+        """,
+        (pair, tf, pair, tf, int(keep)),
+    )
