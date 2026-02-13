@@ -45,7 +45,7 @@ def _load_df_from_neon(pair_short: str, tf: str, limit: int) -> pd.DataFrame:
       WHERE pair=%s AND tf=%s
       ORDER BY ts DESC
       LIMIT %s
-    """, (pair_short, tf, int(limit)) or []
+    """, (pair_short, tf, int(limit))) or []
 
     if not rows:
         return pd.DataFrame(columns=["open","high","low","close"])
