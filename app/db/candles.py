@@ -2,6 +2,14 @@ from datetime import datetime
 import pandas as pd
 from app.db.neon import exec_sql, query_one, query_all
 
+def get_count(pair: str, tf: str) -> int:
+    row = query_one("SELECT COUNT(*) AS n FROM candles WHERE pair=%s AND tf=%s", (pair, tf))
+    return int(row["n"]) if row else 0
+
+def get_oldest_ts(pair: str, tf: str):
+    row = query_one("SELECT MIN(ts) AS ts FROM candles WHERE pair=%s AND tf=%s", (pair, tf))
+    return row["ts"] if row and row["ts"] else None
+    
 def get_last_ts(pair: str, tf: str):
     row = query_one(
         "SELECT last_ts FROM candle_state WHERE pair=%s AND tf=%s",
