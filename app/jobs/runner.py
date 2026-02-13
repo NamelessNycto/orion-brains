@@ -204,7 +204,7 @@ def run_once(universe):
 
             # --- M1: fetch only last 5 minutes (avoid timeout) ---
             WINDOW_MIN = 10
-            start_1m_dt = now - timedelta(minutes=WINDOW_MIN)
+            start_5m_dt = now - timedelta(minutes=WINDOW_MIN)
 
             df5m = fetch_5m_fx(
                 pair,
@@ -213,7 +213,7 @@ def run_once(universe):
             )
 
             if df5m is not None and not df5m.empty:
-                df5m = df1m[df5m.index >= start_5m_dt]  # trim exact window
+                df5m = df5m[df5m.index >= start_5m_dt]  # trim exact window
                 highs = df5m["high"].astype(float)
                 lows = df5m["low"].astype(float)
 
