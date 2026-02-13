@@ -43,10 +43,10 @@ def _fetch_agg(ticker: str, mult: int, span: str, start: str, end: str, limit: i
 
 def fetch_15m_fx(pair: str, start: str, end: str):
     # pair expected: "C:EURUSD"
-    return _fetch_agg(pair, 15, "minute", start, end, limit=500)
+    return _fetch_agg(pair, 15, "minute", start, end, limit=400)
 
 def fetch_1h_fx(pair: str, start: str, end: str):
-    return _fetch_agg(pair, 1, "hour", start, end, limit=500)
+    return _fetch_agg(pair, 1, "hour", start, end, limit=300)
 
 def fetch_5m_fx(pair: str, start: str, end: str):
-    return _fetch_agg(pair, 5, "minute", start, end, limit=200)
+    return _fetch_agg(pair, 5, "minute", start, end, limit=120)
