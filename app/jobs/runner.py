@@ -5,7 +5,7 @@ import numpy as np
 
 from app.core.config import settings
 from app.db.neon import query_one, exec_sql
-from app.services.polygon import fetch_15m_fx, fetch_1h_fx, fetch_1m_fx
+from app.services.polygon import fetch_15m_fx, fetch_1h_fx, fetch_5m_fx
 from app.services.strategy_client import call_trend_engine
 from app.services.telegram import send_telegram
 
@@ -203,19 +203,19 @@ def run_once(universe):
         if pos:
 
             # --- M1: fetch only last 5 minutes (avoid timeout) ---
-            WINDOW_MIN = 5
+            WINDOW_MIN = 10
             start_1m_dt = now - timedelta(minutes=WINDOW_MIN)
 
-            df1m = fetch_1m_fx(
+            df5m = fetch_5m_fx(
                 pair,
-                start_1m_dt.date().isoformat(),
+                start_5m_dt.date().isoformat(),
                 now.date().isoformat()
             )
 
-            if df1m is not None and not df1m.empty:
-                df1m = df1m[df1m.index >= start_1m_dt]  # trim exact window
-                highs = df1m["high"].astype(float)
-                lows = df1m["low"].astype(float)
+            if df5m is not None and not df5m.empty:
+                df5m = df1m[df5m.index >= start_5m_dt]  # trim exact window
+                highs = df5m["high"].astype(float)
+                lows = df5m["low"].astype(float)
 
                 if pos["side"] == "BUY":
                     if lows.min() <= float(pos["sl_price"]):
