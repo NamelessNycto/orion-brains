@@ -202,27 +202,25 @@ def run_once(universe):
 
         if pos:
 
-            # --- M1: fetch only last 5 minutes (avoid timeout) ---
-            WINDOW_MIN = 10
+            WINDOW_MIN = 5
             start_dt = now - timedelta(minutes=WINDOW_MIN)
 
             df5m = fetch_5m_fx(pair, start_dt, now)
 
             if df5m is not None and not df5m.empty:
-                df5m = df5m[df5m.index >= start_dt]  # trim exact window
                 highs = df5m["high"].astype(float)
-                lows = df5m["low"].astype(float)
-
+                lows  = df5m["low"].astype(float)
+                
                 if pos["side"] == "BUY":
                     if lows.min() <= float(pos["sl_price"]):
                         close_position(pos["id"], "SL")
                         send_telegram(f"❌ SL HIT {pos['id']}")
                         continue
-                else:
-                    if highs.max() >= float(pos["sl_price"]):
-                        close_position(pos["id"], "SL")
-                        send_telegram(f"❌ SL HIT {pos['id']}")
-                        continue
+                    else:
+                        if highs.max() >= float(pos["sl_price"]):
+                            close_position(pos["id"], "SL")
+                            send_telegram(f"❌ SL HIT {pos['id']}")
+                            continue
 
             df15 = fetch_15m_fx(pair, (now - timedelta(days=2)).date().isoformat(), now.date().isoformat())
 
