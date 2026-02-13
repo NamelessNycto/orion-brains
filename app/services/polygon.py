@@ -1,7 +1,10 @@
+# app/services/polygon.py
+
 import time
+from datetime import datetime, timezone
 import requests
 import pandas as pd
-from datetime import datetime
+
 from app.core.config import settings
 
 BASE = "https://api.polygon.io"
@@ -15,15 +18,20 @@ SLEEP_429_SEC = 8
 # HELPERS
 # ============================================================
 
-def _to_range_arg(x):
+def _to_range_arg(x) -> str:
     """
     Polygon range endpoint accepts:
       - YYYY-MM-DD
       - unix timestamp in ms
 
-    We convert datetime -> ms timestamp
+    We convert datetime -> ms timestamp.
     """
     if isinstance(x, datetime):
+        # force UTC to avoid timezone surprises
+        if x.tzinfo is None:
+            x = x.replace(tzinfo=timezone.utc)
+        else:
+            x = x.astimezone(timezone.utc)
         return str(int(x.timestamp() * 1000))
     return str(x)
 
@@ -32,12 +40,11 @@ def _to_range_arg(x):
 # CORE FETCH
 # ============================================================
 
-def _fetch_agg(ticker: str, mult: int, span: str, start, end, limit: int = 500):
+def _fetch_agg(ticker: str, mult: int, span: str, start, end, limit: int = 500) -> pd.DataFrame:
     start_arg = _to_range_arg(start)
-    end_arg   = _to_range_arg(end)
+    end_arg = _to_range_arg(end)
 
     url = f"{BASE}/v2/aggs/ticker/{ticker}/range/{mult}/{span}/{start_arg}/{end_arg}"
-
     params = {
         "adjusted": "true",
         "sort": "asc",
@@ -45,10 +52,9 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end, limit: int = 500):
         "apiKey": settings.POLYGON_API_KEY,
     }
 
-    rows = []
+    rows: list[dict] = []
 
     while True:
-
         r = sess.get(url, params=params, timeout=30)
 
         if r.status_code == 429:
@@ -59,28 +65,33 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end, limit: int = 500):
         j = r.json()
 
         for c in (j.get("results") or []):
-            rows.append({
-                "time": pd.to_datetime(c["t"], unit="ms", utc=True),
-                "open": float(c["o"]),
-                "high": float(c["h"]),
-                "low":  float(c["l"]),
-                "close":float(c["c"]),
-            })
+            rows.append(
+                {
+                    "time": pd.to_datetime(c["t"], unit="ms", utc=True),
+                    "open": float(c["o"]),
+                    "high": float(c["h"]),
+                    "low": float(c["l"]),
+                    "close": float(c["c"]),
+                }
+            )
 
         nxt = j.get("next_url")
         if not nxt:
             break
 
-        # Pagination safe handling
+        # Pagination safe handling:
+        # when using next_url, Polygon already includes most params;
+        # we only ensure apiKey is present.
         url = nxt
         if "apiKey=" not in url:
             url += ("&" if "?" in url else "?") + f"apiKey={settings.POLYGON_API_KEY}"
 
+        # next_url already contains query params, so params must be None
         params = None
         time.sleep(PAGE_SLEEP_SEC)
 
     if not rows:
-        return pd.DataFrame(columns=["time","open","high","low","close"]).set_index("time")
+        return pd.DataFrame(columns=["time", "open", "high", "low", "close"]).set_index("time")
 
     df = (
         pd.DataFrame(rows)
@@ -96,13 +107,9 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end, limit: int = 500):
 # PUBLIC CALLS
 # ============================================================
 
-def fetch_15m_fx(pair, start, end, limit=450):
+def fetch_15m_fx(pair: str, start, end, limit: int = 450) -> pd.DataFrame:
     return _fetch_agg(pair, 15, "minute", start, end, limit=limit)
 
 
-def fetch_1h_fx(pair, start, end, limit=180):
+def fetch_1h_fx(pair: str, start, end, limit: int = 180) -> pd.DataFrame:
     return _fetch_agg(pair, 1, "hour", start, end, limit=limit)
-
-
-def fetch_5m_fx(pair, start, end, limit=10):
-    return _fetch_agg(pair, 5, "minute", start, end, limit=limit)
