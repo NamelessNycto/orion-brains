@@ -16,7 +16,7 @@ def call_trend_engine(pair: str, candles_15m: list, candles_1h: list) -> dict:
         }
       }
     """
-    url = settings.STRATEGIES_BASE_URL.rstrip("/") + "/v1/trend_engine/signal"
+    url = settings.STRATEGIES_BASE_URL.rstrip("/") + "/v1/trend_engine"
     payload = {
         "pair": pair,                 # "C:EURUSD"
         "candles_15m": candles_15m,   # list of dicts: time/open/high/low/close
