@@ -1,29 +1,30 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
 
 class Settings(BaseSettings):
     APP_NAME: str = "orion-brain"
-    ENV: str = "dev"
-    LOG_LEVEL: str = "INFO"
+    ENV: str = "prod"
 
-    POLYGON_API_KEY: str
-    POLYGON_BASE: str = "https://api.polygon.io"
+    # Comma-separated: EURUSD,GBPUSD,USDJPY
+    PAIRS: str = "EURUSD,GBPUSD,USDJPY"
 
-    STRATEGIES_BASE_URL: str
-    STRATEGIES_TIMEOUT_SEC: int = 12
+    # Services
+    STRATEGIES_BASE_URL: str = "http://orion-strategies:8000"  # change on Railway
+    STRATEGY_TIMEOUT_SEC: int = 20
 
-    NEON_DSN: str
+    # Polygon
+    POLYGON_API_KEY: str = ""
 
-    TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_CHAT_ID: str
+    # Neon
+    DATABASE_URL: str = ""
 
-    PAIRS: str = "C:EURUSD,C:GBPUSD,C:USDJPY"
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
 
-    FETCH_LOOKBACK_DAYS: int = 8
-    TF_MIN: int = 15
-
-    DEDUPE_TTL_SEC: int = 60*60*24*30
-    MAX_SIGNALS_PER_RUN: int = 6
+    # Runtime
+    RUN_TF_MIN: int = 5          # cron frequency (minutes)
+    TRAIL_TF_MIN: int = 15       # trail updates only on 15m close
+    SL_CHECK_TF_MIN: int = 1     # use 1m candles to detect SL/trail hits
 
     class Config:
         env_file = ".env"
