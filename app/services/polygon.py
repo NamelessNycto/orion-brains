@@ -104,5 +104,5 @@ def fetch_1h_fx(pair, start, end, limit=180):
     return _fetch_agg(pair, 1, "hour", start, end, limit=limit)
 
 
-def fetch_5m_fx(pair, start, end, limit=60):
+def fetch_5m_fx(pair, start, end, limit=10):
     return _fetch_agg(pair, 5, "minute", start, end, limit=limit)
