@@ -1,15 +1,31 @@
+# app/jobs/runner.py
+
+import os
 import logging
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 
-from app.core.config import settings
 from app.db.neon import query_one, query_all, exec_sql
-from app.db.candles import get_last_ts, set_last_ts, upsert_candles, trim_candles
+from app.db.candles import (
+    get_last_ts,
+    set_last_ts,
+    upsert_candles,
+    trim_candles,
+    get_count,
+    get_oldest_ts,
+)
 from app.services.polygon import fetch_15m_fx, fetch_1h_fx
 from app.services.strategy_client import call_trend_engine
 from app.services.telegram import send_telegram
 
 log = logging.getLogger("runner")
+
+# ============================================================
+# FLAGS
+# ============================================================
+
+# DATA_ONLY=1 => only build/maintain candle cache, no strategy, no positions, no telegram
+DATA_ONLY = os.getenv("DATA_ONLY", "0") == "1"
 
 # ============================================================
 # BACKTEST MATCHING PARAMS
@@ -24,62 +40,79 @@ FLOOR_ATR_15_EARLY = 1.35
 
 ATR_LEN_15 = 14
 
+# cache sizes (per pair)
+KEEP_15M = 450
+KEEP_1H = 250
+
+# strategy payload sizes
+PAYLOAD_15M = 400
+PAYLOAD_1H = 200
+
+# backfill targets (build the base gradually)
+TARGET_15M = 400
+TARGET_1H = 200
+
 
 # ============================================================
 # HELPERS
 # ============================================================
 
-def _utc_now():
+def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 def _fmt_pair(pair: str) -> str:
     return pair.replace("C:", "").strip()
 
-def _iso_date(dt: datetime) -> str:
-    return dt.date().isoformat()
-
 def _load_df_from_neon(pair_short: str, tf: str, limit: int) -> pd.DataFrame:
-    rows = query_all("""
-      SELECT ts, open, high, low, close
-      FROM candles
-      WHERE pair=%s AND tf=%s
-      ORDER BY ts DESC
-      LIMIT %s
-    """, (pair_short, tf, int(limit))) or []
+    rows = query_all(
+        """
+        SELECT ts, open, high, low, close
+        FROM candles
+        WHERE pair=%s AND tf=%s
+        ORDER BY ts DESC
+        LIMIT %s
+        """,
+        (pair_short, tf, int(limit)),
+    ) or []
 
     if not rows:
-        return pd.DataFrame(columns=["open","high","low","close"])
+        return pd.DataFrame(columns=["open", "high", "low", "close"])
 
-    # rows are DESC, we want ASC
+    # rows are DESC, we want ASC for indicators/strategy
     rows = list(reversed(rows))
-    df = pd.DataFrame([{
-        "time": r["ts"],
-        "open": float(r["open"]),
-        "high": float(r["high"]),
-        "low":  float(r["low"]),
-        "close":float(r["close"]),
-    } for r in rows])
+
+    df = pd.DataFrame(
+        [{
+            "time": r["ts"],
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low":  float(r["low"]),
+            "close": float(r["close"]),
+        } for r in rows]
+    )
 
     df["time"] = pd.to_datetime(df["time"], utc=True)
     df = df.set_index("time").sort_index()
     return df
 
 def _df_to_candles(df: pd.DataFrame) -> list[dict]:
-    out = []
     if df is None or df.empty:
-        return out
+        return []
+    out = []
     for ts, r in df.iterrows():
         out.append({
             "time": ts.isoformat(),
             "open": float(r["open"]),
             "high": float(r["high"]),
             "low":  float(r["low"]),
-            "close":float(r["close"]),
+            "close": float(r["close"]),
         })
     return out
 
 
-# ================= ATR =================
+# ============================================================
+# INDICATORS
+# ============================================================
 
 def compute_atr(df: pd.DataFrame, n: int = 14):
     high = df["high"].astype(float)
@@ -88,16 +121,16 @@ def compute_atr(df: pd.DataFrame, n: int = 14):
 
     prev_close = close.shift(1)
 
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs()
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
 
     return tr.rolling(n).mean()
-
-
-# ================= FRACTALS =================
 
 def is_pivot_low(df, i, k):
     if i - k < 0 or i + k >= len(df):
@@ -125,20 +158,26 @@ def sync_tf(
     bootstrap_days: int,
     keep: int,
 ):
+    """
+    - pulls only a small time window (now or last_ts-2h .. now)
+    - upserts candles
+    - updates candle_state.last_ts
+    - trims to keep most recent `keep`
+    returns: (has_new, new_last_ts)
+    """
     last_ts = get_last_ts(pair_short, tf)
 
     if last_ts is None:
         start_dt = now - timedelta(days=bootstrap_days)
     else:
-        # petit buffer (2h) pour éviter trous/retards
+        # small buffer to avoid missing late bars
         start_dt = pd.Timestamp(last_ts).to_pydatetime() - timedelta(hours=2)
 
-    # IMPORTANT: on passe datetime -> ton polygon.py convertit en ms
     df = fetch_fn(pair_ticker, start_dt, now)
     if df is None or df.empty:
         return False, last_ts
 
-    # garder seulement les bougies strictement nouvelles
+    # keep only strictly new bars
     if last_ts is not None:
         df = df[df.index > pd.Timestamp(last_ts)]
 
@@ -150,21 +189,22 @@ def sync_tf(
     new_last = df.index[-1].to_pydatetime()
     set_last_ts(pair_short, tf, new_last)
 
-    # “remplacer la plus ancienne par la nouvelle” = trim
     trim_candles(pair_short, tf, keep)
 
     return True, new_last
 
-from app.db.candles import get_count, get_oldest_ts
-
 def backfill_if_needed(pair_ticker, pair_short, tf, fetch_fn, target, chunk_td: timedelta):
+    """
+    Backfill older candles gradually until count >= target.
+    Each run pulls one chunk backwards from the current oldest candle.
+    """
     n = get_count(pair_short, tf)
     if n >= target:
         return False
 
     oldest = get_oldest_ts(pair_short, tf)
     if oldest is None:
-        return False  # pas bootstrap encore
+        return False  # nothing to backfill yet (no bootstrap)
 
     end_dt = pd.Timestamp(oldest).to_pydatetime()
     start_dt = end_dt - chunk_td
@@ -173,69 +213,83 @@ def backfill_if_needed(pair_ticker, pair_short, tf, fetch_fn, target, chunk_td: 
     if df is None or df.empty:
         return False
 
-    # garder uniquement plus vieux que oldest (sinon doublons)
+    # keep only strictly older than current oldest (avoid overlap)
     df = df[df.index < pd.Timestamp(oldest)]
     if df.empty:
         return False
 
     upsert_candles(pair_short, tf, df)
     trim_candles(pair_short, tf, target)
+
     return True
-    
+
+
 # ============================================================
 # DB HELPERS (positions)
 # ============================================================
 
 def get_open_position(pair_short):
-    return query_one("""
-    SELECT * FROM positions
-    WHERE pair=%s AND closed_at IS NULL
-    LIMIT 1
-    """, (pair_short,))
+    return query_one(
+        """
+        SELECT * FROM positions
+        WHERE pair=%s AND closed_at IS NULL
+        LIMIT 1
+        """,
+        (pair_short,),
+    )
 
 def open_position(pos_id, pair_short, side, mode, entry, sl):
-    exec_sql("""
-    INSERT INTO positions(
-        id,pair,side,mode,
-        entry_price,sl_price,
-        trail_price,trail_on,
-        last_15m_ts,last_check_1m_ts,
-        last_swing_price,last_swing_ts
+    exec_sql(
+        """
+        INSERT INTO positions(
+            id,pair,side,mode,
+            entry_price,sl_price,
+            trail_price,trail_on,
+            last_15m_ts,last_check_1m_ts,
+            last_swing_price,last_swing_ts
+        )
+        VALUES(%s,%s,%s,%s,%s,%s,NULL,FALSE,NULL,NULL,NULL,NULL)
+        """,
+        (pos_id, pair_short, side, mode, float(entry), float(sl)),
     )
-    VALUES(%s,%s,%s,%s,%s,%s,NULL,FALSE,NULL,NULL,NULL,NULL)
-    """, (pos_id, pair_short, side, mode, float(entry), float(sl)))
 
 def close_position(pos_id, reason):
-    exec_sql("""
-    UPDATE positions
-    SET closed_at=NOW(), close_reason=%s
-    WHERE id=%s
-    """, (reason, pos_id))
+    exec_sql(
+        """
+        UPDATE positions
+        SET closed_at=NOW(), close_reason=%s
+        WHERE id=%s
+        """,
+        (reason, pos_id),
+    )
 
 def update_trail(pos_id, trail_price, trail_on, last_15m_ts, swing_price, swing_ts):
-    exec_sql("""
-    UPDATE positions
-    SET trail_price=%s,
-        trail_on=%s,
-        last_15m_ts=%s,
-        last_swing_price=%s,
-        last_swing_ts=%s
-    WHERE id=%s
-    """, (
-        float(trail_price),
-        bool(trail_on),
-        last_15m_ts,
-        (float(swing_price) if swing_price is not None else None),
-        swing_ts,
-        pos_id
-    ))
+    exec_sql(
+        """
+        UPDATE positions
+        SET trail_price=%s,
+            trail_on=%s,
+            last_15m_ts=%s,
+            last_swing_price=%s,
+            last_swing_ts=%s
+        WHERE id=%s
+        """,
+        (
+            float(trail_price),
+            bool(trail_on),
+            last_15m_ts,
+            (float(swing_price) if swing_price is not None else None),
+            swing_ts,
+            pos_id,
+        ),
+    )
 
 
 # ============================================================
 # TRAIL ENGINE (MATCH BACKTEST)
 # ============================================================
 
-def compute_trail(pos, df15):
+def compute_trail(pos, df15: pd.DataFrame):
     df15 = df15.copy()
     df15["ATR15"] = compute_atr(df15, ATR_LEN_15)
 
@@ -304,19 +358,26 @@ def run_once(universe):
         pair_short = _fmt_pair(pair)
         out["pairs"][pair_short] = {"actions": []}
 
-        # 1) Sync candles to Neon (small calls)
-        new_15m, last15 = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=450)
-        new_1h,  last1h = sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=250)
-        backfill_if_needed(pair, pair_short, "15m", fetch_15m_fx, target=400, chunk_td=timedelta(days=1))
-        backfill_if_needed(pair, pair_short, "1h",  fetch_1h_fx,  target=200, chunk_td=timedelta(days=2))
-        # If no new 15m candle -> nothing to do (fast cron)
-        if not new_15m:
-            out["pairs"][pair_short]["actions"].append("no_new_15m")
+        # --- Sync newest bars (small calls) ---
+        sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
+        sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=KEEP_1H)
+
+        # --- Optional: build base gradually (DATA_ONLY mode) ---
+        if DATA_ONLY:
+            did15 = backfill_if_needed(pair, pair_short, "15m", fetch_15m_fx, target=TARGET_15M, chunk_td=timedelta(days=1))
+            did1h = backfill_if_needed(pair, pair_short, "1h",  fetch_1h_fx,  target=TARGET_1H,  chunk_td=timedelta(days=2))
+            out["pairs"][pair_short]["actions"].append(f"data_only_backfill_15m={did15}")
+            out["pairs"][pair_short]["actions"].append(f"data_only_backfill_1h={did1h}")
             continue
 
-        # 2) Load candles from Neon (cache)
-        df15 = _load_df_from_neon(pair_short, "15m", limit=450)
-        df1h = _load_df_from_neon(pair_short, "1h",  limit=250)
+        # --- Normal mode: only act on new 15m bar close ---
+        last_ts_15m = get_last_ts(pair_short, "15m")
+        if last_ts_15m is None:
+            out["pairs"][pair_short]["actions"].append("no_15m_state")
+            continue
+
+        df15 = _load_df_from_neon(pair_short, "15m", limit=KEEP_15M)
+        df1h = _load_df_from_neon(pair_short, "1h",  limit=KEEP_1H)
 
         if df15.empty or df1h.empty:
             out["pairs"][pair_short]["actions"].append("no_cached_data")
@@ -327,16 +388,14 @@ def run_once(universe):
         pos = get_open_position(pair_short)
 
         # ====================================================
-        # MANAGE OPEN POSITION (only on new 15m close)
+        # MANAGE OPEN POSITION
         # ====================================================
         if pos:
-            # skip if already processed this 15m candle
             if pos["last_15m_ts"] is not None:
                 if pd.Timestamp(pos["last_15m_ts"]).to_pydatetime() >= last15_ts:
                     out["pairs"][pair_short]["actions"].append("already_processed_15m")
                     continue
 
-            # SL / TRAIL hit check using last closed 15m candle (backtest-like)
             last = df15.iloc[-1]
             hi = float(last["high"])
             lo = float(last["low"])
@@ -368,7 +427,6 @@ def run_once(universe):
                     out["pairs"][pair_short]["actions"].append("closed_TRAIL")
                     continue
 
-            # activation (0.9 early / 0.7 confirmed)
             risk = abs(float(pos["entry_price"]) - float(pos["sl_price"]))
             if risk > 0:
                 fav = (hi - float(pos["entry_price"])) / risk if pos["side"] == "BUY" else (float(pos["entry_price"]) - lo) / risk
@@ -392,10 +450,13 @@ def run_once(universe):
             continue
 
         # ====================================================
-        # ENTRY (only when new 15m closes)
+        # ENTRY
         # ====================================================
-
-        payload = call_trend_engine(pair, _df_to_candles(df15.tail(400)), _df_to_candles(df1h.tail(200)))
+        payload = call_trend_engine(
+            pair,
+            _df_to_candles(df15.tail(PAYLOAD_15M)),
+            _df_to_candles(df1h.tail(PAYLOAD_1H)),
+        )
         sig = payload.get("signal")
 
         if not sig:
