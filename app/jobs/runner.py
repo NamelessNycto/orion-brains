@@ -396,7 +396,7 @@ def run_once(universe):
             _df_to_candles(df15.tail(PAYLOAD_15M)),
             _df_to_candles(df1h.tail(PAYLOAD_1H)),
         )
-        sig = 
+        sig = {
         "side": "BUY",
         "mode": "EARLY",
         "entry": float(df15.iloc[-1]["close"]),
