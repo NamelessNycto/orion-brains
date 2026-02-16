@@ -31,25 +31,28 @@ def _to_utc_timestamp(ts: TsLike) -> pd.Timestamp:
     return t.tz_convert("UTC")
 
 
-def _normalize_ts(ts: datetime | pd.Timestamp, tf: str) -> pd.Timestamp:
+def _normalize_ts(ts: TsLike, tf: str) -> pd.Timestamp:
     """
-    Normalize candle timestamps so they land on the expected grid:
-      - 15m => :00/:15/:30/:45
-      - 1h  => :00
-    Always returns UTC Timestamp.
-    """
-    t = pd.Timestamp(ts)
+    Normalize candle timestamps so they land on the expected CLOSE grid.
 
-    # ensure UTC
-    if t.tzinfo is None:
-        t = t.tz_localize("UTC")
-    else:
-        t = t.tz_convert("UTC")
+    Important:
+    - Polygon may return slightly "off-grid" timestamps (few minutes/seconds drift).
+    - Using floor() can push bars into the previous bucket and cause collisions,
+      making MAX(ts) look stuck.
+    - We snap to the nearest bucket instead.
+
+    15m => :00/:15/:30/:45  (nearest)
+    1h  => :00             (nearest)
+    """
+    t = _to_utc_timestamp(ts)
 
     if tf == "15m":
-        return t.floor("15min")
+        # snap to nearest 15m bucket
+        return (t + pd.Timedelta(minutes=7, seconds=30)).floor("15min")
+
     if tf == "1h":
-        return t.floor("1H")
+        # snap to nearest hour bucket
+        return (t + pd.Timedelta(minutes=30)).floor("1H")
 
     return t
 
@@ -69,6 +72,14 @@ def get_count(pair: str, tf: str) -> int:
 def get_oldest_ts(pair: str, tf: str) -> Optional[datetime]:
     row = query_one(
         "SELECT MIN(ts) AS ts FROM candles WHERE pair=%s AND tf=%s",
+        (pair, tf),
+    )
+    return row["ts"] if row and row.get("ts") else None
+
+
+def get_newest_ts(pair: str, tf: str) -> Optional[datetime]:
+    row = query_one(
+        "SELECT MAX(ts) AS ts FROM candles WHERE pair=%s AND tf=%s",
         (pair, tf),
     )
     return row["ts"] if row and row.get("ts") else None
@@ -102,6 +113,10 @@ def upsert_candles(pair: str, tf: str, df: pd.DataFrame) -> None:
     """
     df index must be timestamps, columns: open/high/low/close
     We normalize timestamps to the TF grid before writing.
+
+    Critical:
+    - Normalize first
+    - Deduplicate per normalized timestamp (keep last) to avoid silent collisions
     """
     if df is None or df.empty:
         return
@@ -111,9 +126,12 @@ def upsert_candles(pair: str, tf: str, df: pd.DataFrame) -> None:
     # Ensure index is UTC tz-aware
     df.index = pd.to_datetime(df.index, utc=True)
 
-    for ts, r in df.iterrows():
-        nts = _normalize_ts(ts, tf)
+    # Normalize index and dedupe
+    df.index = df.index.map(lambda x: _normalize_ts(x, tf))
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
 
+    for ts, r in df.iterrows():
         exec_sql(
             """
             INSERT INTO candles(pair, tf, ts, open, high, low, close)
@@ -127,7 +145,7 @@ def upsert_candles(pair: str, tf: str, df: pd.DataFrame) -> None:
             (
                 pair,
                 tf,
-                nts.to_pydatetime(),
+                ts.to_pydatetime(),
                 float(r["open"]),
                 float(r["high"]),
                 float(r["low"]),
@@ -190,7 +208,3 @@ def trim_candles(pair: str, tf: str, keep: int) -> None:
         """,
         (pair, tf, int(keep), pair, tf),
     )
-
-def get_newest_ts(pair: str, tf: str):
-    row = query_one("SELECT MAX(ts) AS ts FROM candles WHERE pair=%s AND tf=%s", (pair, tf))
-    return row["ts"] if row and row.get("ts") else None
