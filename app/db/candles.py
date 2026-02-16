@@ -94,14 +94,20 @@ def get_last_ts(pair: str, tf: str) -> Optional[datetime]:
 
 
 def set_last_ts(pair: str, tf: str, ts: datetime) -> None:
-    nts = _normalize_ts(ts, tf).to_pydatetime()
+    # IMPORTANT: on stocke l'horodatage EXACT (juste UTC), pas de floor/round
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+
     exec_sql(
         """
         INSERT INTO candle_state(pair, tf, last_ts)
         VALUES (%s,%s,%s)
         ON CONFLICT (pair, tf) DO UPDATE SET last_ts=EXCLUDED.last_ts
         """,
-        (pair, tf, nts),
+        (pair, tf, t.to_pydatetime()),
     )
 
 
