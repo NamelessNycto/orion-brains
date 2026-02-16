@@ -1,9 +1,9 @@
-# app/db/candles.py
-
 from __future__ import annotations
 
+# app/db/candles.py
+
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
 
@@ -11,24 +11,40 @@ from app.db.neon import exec_sql, query_one, query_all
 
 
 # ============================================================
-# TS NORMALIZATION (fixes the 21:02 / 21:17 / ... drift)
+# TS NORMALIZATION (fixes 21:02 / 21:17 / ... drift)
 # ============================================================
 
-def _normalize_ts(ts: datetime | pd.Timestamp, tf: str) -> pd.Timestamp:
+TsLike = Union[datetime, pd.Timestamp]
+
+
+def _to_utc_timestamp(ts: TsLike) -> pd.Timestamp:
     """
-    Normalize candle timestamps so they land on the expected grid:
+    Convert datetime/pandas timestamp to UTC pandas Timestamp (tz-aware).
+    """
+    t = pd.Timestamp(ts)
+
+    # if naive -> assume UTC
+    if t.tzinfo is None:
+        return t.tz_localize("UTC")
+
+    # if aware -> convert to UTC
+    return t.tz_convert("UTC")
+
+
+def _normalize_ts(ts: TsLike, tf: str) -> pd.Timestamp:
+    """
+    Normalize candle timestamps so they land on expected grid:
       - 15m => :00/:15/:30/:45
       - 1h  => :00
-    Always returns UTC Timestamp.
     """
-    t = pd.Timestamp(ts, tz="UTC") if not isinstance(ts, pd.Timestamp) else ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
+    t = _to_utc_timestamp(ts)
 
     if tf == "15m":
         return t.floor("15min")
+
     if tf == "1h":
         return t.floor("1H")
 
-    # fallback: do not modify other TFs
     return t
 
 
@@ -60,8 +76,7 @@ def get_last_ts(pair: str, tf: str) -> Optional[datetime]:
     return row["last_ts"] if row and row.get("last_ts") else None
 
 
-def set_last_ts(pair: str, tf: str, ts: datetime):
-    # store normalized
+def set_last_ts(pair: str, tf: str, ts: datetime) -> None:
     nts = _normalize_ts(ts, tf).to_pydatetime()
     exec_sql(
         """
@@ -77,7 +92,7 @@ def set_last_ts(pair: str, tf: str, ts: datetime):
 # UPSERT / LOAD
 # ============================================================
 
-def upsert_candles(pair: str, tf: str, df: pd.DataFrame):
+def upsert_candles(pair: str, tf: str, df: pd.DataFrame) -> None:
     """
     df index must be timestamps, columns: open/high/low/close
     We normalize timestamps to the TF grid before writing.
@@ -85,14 +100,10 @@ def upsert_candles(pair: str, tf: str, df: pd.DataFrame):
     if df is None or df.empty:
         return
 
-    # ensure UTC index
-    idx = df.index
-    if getattr(idx, "tz", None) is None:
-        df = df.copy()
-        df.index = pd.to_datetime(df.index, utc=True)
-    else:
-        df = df.copy()
-        df.index = df.index.tz_convert("UTC")
+    df = df.copy()
+
+    # Ensure index is UTC tz-aware
+    df.index = pd.to_datetime(df.index, utc=True)
 
     for ts, r in df.iterrows():
         nts = _normalize_ts(ts, tf)
@@ -121,7 +132,7 @@ def upsert_candles(pair: str, tf: str, df: pd.DataFrame):
 
 def load_candles(pair: str, tf: str, limit: int):
     """
-    Returns candles ASC (oldest -> newest) for strategy consumption.
+    Returns candles ASC (oldest -> newest).
     """
     rows = query_all(
         """
@@ -132,9 +143,9 @@ def load_candles(pair: str, tf: str, limit: int):
         LIMIT %s
         """,
         (pair, tf, int(limit)),
-    )
+    ) or []
 
-    rows = list(reversed(rows or []))  # return ASC
+    rows = list(reversed(rows))  # ASC
 
     return [
         {
@@ -152,7 +163,7 @@ def load_candles(pair: str, tf: str, limit: int):
 # TRIM (keep last N)
 # ============================================================
 
-def trim_candles(pair: str, tf: str, keep: int):
+def trim_candles(pair: str, tf: str, keep: int) -> None:
     """
     Keep only the most recent `keep` candles for (pair, tf).
     Deletes older rows.
