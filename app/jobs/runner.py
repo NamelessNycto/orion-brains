@@ -396,12 +396,7 @@ def run_once(universe):
             _df_to_candles(df15.tail(PAYLOAD_15M)),
             _df_to_candles(df1h.tail(PAYLOAD_1H)),
         )
-        sig = {
-        "side": "BUY",
-        "mode": "EARLY",
-        "entry": float(df15.iloc[-1]["close"]),
-        "sl": float(df15.iloc[-1]["close"]) - 0.0020
-        }
+        sig = payload.get("signal")
 
         if not sig:
             out["pairs"][pair_short]["actions"].append("no_signal")
