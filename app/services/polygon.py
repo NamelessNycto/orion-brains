@@ -60,7 +60,7 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end) -> pd.DataFrame:
     params = {
         "adjusted": "true",
         "sort": "asc",
-        "limit": 50,   # 🚀 important: let pagination work naturally
+        "limit": 50000,  # ✅ max allowed, fewer pagination calls
         "apiKey": settings.POLYGON_API_KEY,
     }
 
@@ -69,16 +69,18 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end) -> pd.DataFrame:
     while True:
         r = sess.get(url, params=params, timeout=30)
 
+        # rate limit handling
         if r.status_code == 429:
             time.sleep(SLEEP_429_SEC)
             continue
 
+        # debug for auth issues
         if r.status_code in (401, 403):
             try:
                 print("Polygon error:", r.status_code, r.json())
             except Exception:
                 print("Polygon error:", r.status_code, r.text)
-        
+
         r.raise_for_status()
         j = r.json()
 
@@ -114,8 +116,12 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end) -> pd.DataFrame:
         .set_index("time")
     )
 
-    # 🔥 convert OPEN timestamp → CLOSE timestamp
+    # 🔥 Convert OPEN → CLOSE timestamp
     df = _apply_close_timestamp(df, mult, span)
+
+    # 🔒 Remove future / incomplete candles
+    now_utc = pd.Timestamp.now(tz="UTC")
+    df = df[df.index <= now_utc]
 
     return df
 
