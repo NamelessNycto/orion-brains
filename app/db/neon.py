@@ -2,7 +2,7 @@
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from psycopg2 import OperationalError, InterfaceError, DatabaseError
+from psycopg2 import OperationalError, InterfaceError
 from app.core.config import settings
 
 _conn = None
@@ -21,7 +21,7 @@ def _connect():
 def get_conn():
     global _conn
 
-    if _conn is None or _conn.closed != 0:
+    if _conn is None or getattr(_conn, "closed", 1) != 0:
         _conn = _connect()
         _conn.autocommit = True
         return _conn
@@ -42,31 +42,19 @@ def get_conn():
 
 def query_one(sql: str, params=None):
     conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params or ())
-            return cur.fetchone()
-    except Exception:
-        conn.rollback()
-        raise
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        return cur.fetchone()
 
 
 def query_all(sql: str, params=None):
     conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params or ())
-            return cur.fetchall()
-    except Exception:
-        conn.rollback()
-        raise
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        return cur.fetchall()
 
 
 def exec_sql(sql: str, params=None):
     conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params or ())
-    except Exception:
-        conn.rollback()
-        raise
+    with conn.cursor() as cur:
+        cur.execute(sql, params or ())
