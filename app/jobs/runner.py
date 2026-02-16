@@ -4,6 +4,7 @@ import os
 import logging
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import requests
 
 from app.db.neon import query_one, query_all, exec_sql
 from app.db.candles import (
@@ -109,6 +110,13 @@ def _df_to_candles(df: pd.DataFrame) -> list[dict]:
         })
     return out
 
+def _is_http_429(err: Exception) -> bool:
+    if isinstance(err, requests.exceptions.HTTPError):
+        resp = getattr(err, "response", None)
+        if resp is not None and getattr(resp, "status_code", None) == 429:
+            return True
+    return False
+
 
 # ============================================================
 # INDICATORS
@@ -159,7 +167,7 @@ def sync_tf(
     keep: int,
 ):
     """
-    - pulls only a small time window (now or last_ts-2h .. now)
+    - pulls only a small time window (bootstrap once, then last_ts-2h .. now)
     - upserts candles
     - updates candle_state.last_ts
     - trims to keep most recent `keep`
@@ -197,6 +205,7 @@ def backfill_if_needed(pair_ticker, pair_short, tf, fetch_fn, target, chunk_td: 
     """
     Backfill older candles gradually until count >= target.
     Each run pulls one chunk backwards from the current oldest candle.
+    Only used in DATA_ONLY mode.
     """
     n = get_count(pair_short, tf)
     if n >= target:
@@ -358,24 +367,27 @@ def run_once(universe):
         pair_short = _fmt_pair(pair)
         out["pairs"][pair_short] = {"actions": []}
 
-        # --- Sync newest bars (small calls) ---
-        sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
-        sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=KEEP_1H)
+        try:
+            # --- Sync newest bars (small calls) ---
+            sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
+            sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=KEEP_1H)
 
-        # --- Optional: build base gradually (DATA_ONLY mode) ---
-        if DATA_ONLY:
-            did15 = backfill_if_needed(pair, pair_short, "15m", fetch_15m_fx, target=TARGET_15M, chunk_td=timedelta(days=1))
-            did1h = backfill_if_needed(pair, pair_short, "1h",  fetch_1h_fx,  target=TARGET_1H,  chunk_td=timedelta(days=2))
-            out["pairs"][pair_short]["actions"].append(f"data_only_backfill_15m={did15}")
-            out["pairs"][pair_short]["actions"].append(f"data_only_backfill_1h={did1h}")
-            continue
+            # --- Optional: build base gradually (DATA_ONLY mode) ---
+            if DATA_ONLY:
+                did15 = backfill_if_needed(pair, pair_short, "15m", fetch_15m_fx, target=TARGET_15M, chunk_td=timedelta(days=1))
+                did1h = backfill_if_needed(pair, pair_short, "1h",  fetch_1h_fx,  target=TARGET_1H,  chunk_td=timedelta(days=2))
+                out["pairs"][pair_short]["actions"].append(f"data_only_backfill_15m={did15}")
+                out["pairs"][pair_short]["actions"].append(f"data_only_backfill_1h={did1h}")
+                continue
 
-        # --- Normal mode: only act on new 15m bar close ---
-        last_ts_15m = get_last_ts(pair_short, "15m")
-        if last_ts_15m is None:
-            out["pairs"][pair_short]["actions"].append("no_15m_state")
-            continue
+        except Exception as e:
+            # if Polygon rate-limited => stop all pairs until next cron
+            if _is_http_429(e):
+                log.warning("Polygon 429 hit — stopping run until next cron.")
+                return {"error": "polygon_rate_limited"}
+            raise
 
+        # --- Normal mode: run strategy ---
         df15 = _load_df_from_neon(pair_short, "15m", limit=KEEP_15M)
         df1h = _load_df_from_neon(pair_short, "1h",  limit=KEEP_1H)
 
