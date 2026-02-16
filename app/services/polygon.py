@@ -60,7 +60,7 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end) -> pd.DataFrame:
     params = {
         "adjusted": "true",
         "sort": "asc",
-        "limit": 500,   # 🚀 important: let pagination work naturally
+        "limit": 50,   # 🚀 important: let pagination work naturally
         "apiKey": settings.POLYGON_API_KEY,
     }
 
@@ -73,6 +73,12 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end) -> pd.DataFrame:
             time.sleep(SLEEP_429_SEC)
             continue
 
+        if r.status_code in (401, 403):
+            try:
+                print("Polygon error:", r.status_code, r.json())
+            except Exception:
+                print("Polygon error:", r.status_code, r.text)
+        
         r.raise_for_status()
         j = r.json()
 
