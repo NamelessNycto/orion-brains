@@ -167,16 +167,23 @@ def is_pivot_high(df, i, k):
 # CANDLES SYNC (Polygon -> Neon)
 # ============================================================
 
+def _tf_delta(tf: str) -> timedelta:
+    if tf == "15m":
+        return timedelta(minutes=15)
+    if tf == "1h":
+        return timedelta(hours=1)
+    raise ValueError(f"Unsupported tf: {tf}")
+    
 def sync_tf(pair_ticker, pair_short, tf, now, fetch_fn, bootstrap_days, keep):
     last_ts = get_last_ts(pair_short, tf)
     newest_db = get_newest_ts(pair_short, tf)
 
-    # si candle_state vide mais DB a déjà des bougies => on s'aligne
+    # 1️⃣ Si candle_state vide mais DB contient déjà des bougies → alignement
     if last_ts is None and newest_db is not None:
         last_ts = newest_db
         set_last_ts(pair_short, tf, newest_db)
 
-    # si candle_state part dans le futur vs DB => on corrige
+    # 2️⃣ Si candle_state est incohérent vs DB → correction
     if last_ts is not None and newest_db is not None:
         if pd.Timestamp(last_ts) > pd.Timestamp(newest_db) + pd.Timedelta(minutes=1):
             last_ts = newest_db
@@ -184,79 +191,49 @@ def sync_tf(pair_ticker, pair_short, tf, now, fetch_fn, bootstrap_days, keep):
 
     delta = _tf_delta(tf)
 
-    # start_dt / end_dt:
-    # DB stores CLOSE timestamps (because polygon.py adds +delta).
-    # Polygon range expects OPEN timestamps, so we query from (last_close - delta).
+    # 3️⃣ Calcul du start OPEN
     if last_ts is None:
-        start_dt = now - timedelta(days=bootstrap_days)
+        # bootstrap initial
+        start_open = now - timedelta(days=bootstrap_days)
     else:
-        start_dt = (pd.Timestamp(last_ts) - delta).to_pydatetime()
+        # DB stocke CLOSE → Polygon veut OPEN
+        start_open = pd.Timestamp(last_ts) - delta
 
-    # Important: avoid requesting OPEN bars whose CLOSE would be > now (future close)
-    # So end OPEN <= now - delta.
-    end_dt = (pd.Timestamp(now) - delta).to_pydatetime()
+    # 4️⃣ Calcul du end OPEN
+    # On ne veut PAS demander une bougie dont la CLOSE serait dans le futur
+    # Donc OPEN <= now - delta
+    end_open = pd.Timestamp(now) - delta
 
-    # if we are too close (end <= start), do nothing
-    if pd.Timestamp(end_dt) <= pd.Timestamp(start_dt):
+    # Sécurité : si fenêtre invalide
+    if end_open <= pd.Timestamp(start_open):
         return False, last_ts
+
+    # Conversion python datetime
+    start_dt = start_open.to_pydatetime()
+    end_dt = end_open.to_pydatetime()
 
     df = fetch_fn(pair_ticker, start_dt, end_dt)
     if df is None or df.empty:
         return False, last_ts
 
-    # garder seulement le nouveau (df.index is CLOSE timestamp already)
+    # 5️⃣ Garder uniquement les nouvelles CLOSE
     if last_ts is not None:
         df = df[df.index > pd.Timestamp(last_ts)]
 
     if df.empty:
         return False, last_ts
 
+    # 6️⃣ Upsert
     upsert_candles(pair_short, tf, df)
 
+    # 7️⃣ Update last_ts (CLOSE timestamp exact)
     new_last = df.index[-1].to_pydatetime()
     set_last_ts(pair_short, tf, new_last)
 
+    # 8️⃣ Trim cache
     trim_candles(pair_short, tf, keep)
 
     return True, new_last
-
-def backfill_if_needed(pair_ticker, pair_short, tf, fetch_fn, target, chunk_td: timedelta):
-    """
-    Backfill older candles gradually until count >= target.
-    Each run pulls one chunk backwards from the current oldest candle.
-    Only used in DATA_ONLY mode.
-    """
-    n = get_count(pair_short, tf)
-    if n >= target:
-        return False
-
-    oldest = get_oldest_ts(pair_short, tf)
-    if oldest is None:
-        return False  # nothing to backfill yet (no bootstrap)
-
-    delta = _tf_delta(tf)
-
-    # oldest in DB is CLOSE timestamp. Polygon needs OPEN.
-    # To fetch candles that CLOSE before `oldest`, we must end at (oldest_close - delta) in OPEN-time.
-    end_dt = (pd.Timestamp(oldest) - delta).to_pydatetime()
-    start_dt = (pd.Timestamp(end_dt) - chunk_td).to_pydatetime()
-
-    if pd.Timestamp(end_dt) <= pd.Timestamp(start_dt):
-        return False
-
-    df = fetch_fn(pair_ticker, start_dt, end_dt)
-    if df is None or df.empty:
-        return False
-
-    # keep only strictly older than current oldest (avoid overlap)
-    df = df[df.index < pd.Timestamp(oldest)]
-    if df.empty:
-        return False
-
-    upsert_candles(pair_short, tf, df)
-    trim_candles(pair_short, tf, target)
-
-    return True
 
 
 # ============================================================
