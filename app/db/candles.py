@@ -190,3 +190,7 @@ def trim_candles(pair: str, tf: str, keep: int) -> None:
         """,
         (pair, tf, int(keep), pair, tf),
     )
+
+def get_newest_ts(pair: str, tf: str):
+    row = query_one("SELECT MAX(ts) AS ts FROM candles WHERE pair=%s AND tf=%s", (pair, tf))
+    return row["ts"] if row and row.get("ts") else None
