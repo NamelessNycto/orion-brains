@@ -14,6 +14,7 @@ from app.db.candles import (
     trim_candles,
     get_count,
     get_oldest_ts,
+    get_newest_ts,
 )
 from app.services.polygon import fetch_15m_fx, fetch_1h_fx
 from app.services.strategy_client import call_trend_engine
@@ -157,15 +158,20 @@ def is_pivot_high(df, i, k):
 # CANDLES SYNC (Polygon -> Neon)
 # ============================================================
 
-def sync_tf(
-    pair_ticker: str,
-    pair_short: str,
-    tf: str,
-    now: datetime,
-    fetch_fn,
-    bootstrap_days: int,
-    keep: int,
-):
+def sync_tf(pair_ticker, pair_short, tf, now, fetch_fn, bootstrap_days, keep):
+    last_ts = get_last_ts(pair_short, tf)
+    newest_db = get_newest_ts(pair_short, tf)
+
+    # ✅ si candle_state est vide → on s’aligne sur la DB
+    if last_ts is None and newest_db is not None:
+        last_ts = newest_db
+        set_last_ts(pair_short, tf, newest_db)
+
+    # ✅ si candle_state est "dans le futur" vs DB → on corrige
+    if last_ts is not None and newest_db is not None:
+        if pd.Timestamp(last_ts) > pd.Timestamp(newest_db) + pd.Timedelta(minutes=1):
+            last_ts = newest_db
+            set_last_ts(pair_short, tf, newest_db)
     """
     - pulls only a small time window (bootstrap once, then last_ts-2h .. now)
     - upserts candles
