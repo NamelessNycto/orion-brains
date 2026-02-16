@@ -162,36 +162,29 @@ def sync_tf(pair_ticker, pair_short, tf, now, fetch_fn, bootstrap_days, keep):
     last_ts = get_last_ts(pair_short, tf)
     newest_db = get_newest_ts(pair_short, tf)
 
-    # ✅ si candle_state est vide → on s’aligne sur la DB
+    # si candle_state vide mais DB a déjà des bougies => on s'aligne
     if last_ts is None and newest_db is not None:
         last_ts = newest_db
         set_last_ts(pair_short, tf, newest_db)
 
-    # ✅ si candle_state est "dans le futur" vs DB → on corrige
+    # si candle_state part dans le futur vs DB => on corrige
     if last_ts is not None and newest_db is not None:
         if pd.Timestamp(last_ts) > pd.Timestamp(newest_db) + pd.Timedelta(minutes=1):
             last_ts = newest_db
             set_last_ts(pair_short, tf, newest_db)
-    """
-    - pulls only a small time window (bootstrap once, then last_ts-2h .. now)
-    - upserts candles
-    - updates candle_state.last_ts
-    - trims to keep most recent `keep`
-    returns: (has_new, new_last_ts)
-    """
-    last_ts = get_last_ts(pair_short, tf)
 
+    # start_dt
     if last_ts is None:
         start_dt = now - timedelta(days=bootstrap_days)
     else:
-        # small buffer to avoid missing late bars
-        start_dt = pd.Timestamp(last_ts).to_pydatetime() - timedelta(hours=2)
+        # ✅ pas de -2h : on veut strictement la suite
+        start_dt = pd.Timestamp(last_ts).to_pydatetime()
 
     df = fetch_fn(pair_ticker, start_dt, now)
     if df is None or df.empty:
         return False, last_ts
 
-    # keep only strictly new bars
+    # ✅ garder seulement le nouveau
     if last_ts is not None:
         df = df[df.index > pd.Timestamp(last_ts)]
 
