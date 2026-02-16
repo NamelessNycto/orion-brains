@@ -286,6 +286,8 @@ def run_once(universe):
         try:
             # 1) Fetch last N candles directly from Polygon
             df15 = _fetch_last_n(pair, "15m", n=max(PAYLOAD_15M, 450), now=now)
+            log.info(f"NOW UTC: {now.isoformat()}")
+            log.info(f"LAST 15m CLOSE FROM POLYGON: {df15.index[-1].isoformat()}")
             df1h = _fetch_last_n(pair, "1h",  n=max(PAYLOAD_1H, 250), now=now)
 
         except Exception as e:
