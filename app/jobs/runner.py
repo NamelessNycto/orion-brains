@@ -272,6 +272,11 @@ def compute_trail(pos, df15: pd.DataFrame):
 
 def run_once(universe):
     now = _utc_now()
+
+    # Only run strategy on real 15m close
+    if now.minute % 15 != 0:
+        return {"skipped": "not_15m_close"}
+    
     out = {"pairs": {}}
 
     for pair in universe:
