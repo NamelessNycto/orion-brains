@@ -367,9 +367,12 @@ def run_once(universe):
         out["pairs"][pair_short] = {"actions": []}
 
         try:
-            # --- Sync newest bars (small calls) ---
-            sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
+            new15, _ = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
             sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=KEEP_1H)
+            
+            if not DATA_ONLY and not new15:
+                out["pairs"][pair_short]["actions"].append("no_new_15m")
+                continue
 
             # --- Optional: build base gradually (DATA_ONLY mode) ---
             if DATA_ONLY:
