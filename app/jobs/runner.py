@@ -372,17 +372,33 @@ def run_once(universe):
                 fav = 0.0
 
             act = 0.9 if pos["mode"] == "EARLY" else 0.7
+            
+            trail_just_enabled = False
             if (not trail_on) and (fav >= act):
                 trail_on = True
-                send_telegram(f"🟣 TRAIL ON\nid={pos['id']}\npair={pair_short}\nmode={pos['mode']}")
-
+                trail_just_enabled = True
+                
             old_trail = float(pos["trail_price"]) if pos["trail_price"] is not None else float(pos["sl_price"])
             trail_on, new_trail, swing, swing_ts = compute_trail({**pos, "trail_on": trail_on}, df15)
-
+            
             update_trail(pos["id"], new_trail, trail_on, last15_ts, swing, swing_ts)
-
-            if trail_on and abs(new_trail - old_trail) > 0.00005:
-                send_telegram(f"🔁 TRAIL UPDATE\nid={pos['id']}\npair={pair_short}\ntrail={new_trail}")
+            
+            if trail_just_enabled:
+                send_telegram(
+                    f"🟣 TRAIL ON\n"
+                    f"id={pos['id']}\n"
+                    f"pair={pair_short}\n"
+                    f"mode={pos['mode']}\n"
+                    f"trail={new_trail}"
+                )
+            
+            elif trail_on and abs(new_trail - old_trail) > 0.00005:
+                send_telegram(
+                    f"🔁 TRAIL UPDATE\n"
+                    f"id={pos['id']}\n"
+                    f"pair={pair_short}\n"
+                    f"trail={new_trail}"
+                )
 
             out["pairs"][pair_short]["actions"].append("managed_position")
             continue
