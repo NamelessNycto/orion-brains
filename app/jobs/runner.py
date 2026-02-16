@@ -118,6 +118,15 @@ def _is_http_429(err: Exception) -> bool:
             return True
     return False
 
+def _tf_delta(tf: str) -> timedelta:
+    # Polygon returns OPEN ts, your polygon.py converts to CLOSE ts (+delta).
+    # DB last_ts/oldest_ts are CLOSE timestamps.
+    if tf == "15m":
+        return timedelta(minutes=15)
+    if tf == "1h":
+        return timedelta(hours=1)
+    return timedelta(0)
+
 
 # ============================================================
 # INDICATORS
@@ -173,18 +182,29 @@ def sync_tf(pair_ticker, pair_short, tf, now, fetch_fn, bootstrap_days, keep):
             last_ts = newest_db
             set_last_ts(pair_short, tf, newest_db)
 
-    # start_dt
+    delta = _tf_delta(tf)
+
+    # start_dt / end_dt:
+    # DB stores CLOSE timestamps (because polygon.py adds +delta).
+    # Polygon range expects OPEN timestamps, so we query from (last_close - delta).
     if last_ts is None:
         start_dt = now - timedelta(days=bootstrap_days)
     else:
-        # ✅ pas de -2h : on veut strictement la suite
-        start_dt = pd.Timestamp(last_ts).to_pydatetime()
+        start_dt = (pd.Timestamp(last_ts) - delta).to_pydatetime()
 
-    df = fetch_fn(pair_ticker, start_dt, now)
+    # Important: avoid requesting OPEN bars whose CLOSE would be > now (future close)
+    # So end OPEN <= now - delta.
+    end_dt = (pd.Timestamp(now) - delta).to_pydatetime()
+
+    # if we are too close (end <= start), do nothing
+    if pd.Timestamp(end_dt) <= pd.Timestamp(start_dt):
+        return False, last_ts
+
+    df = fetch_fn(pair_ticker, start_dt, end_dt)
     if df is None or df.empty:
         return False, last_ts
 
-    # ✅ garder seulement le nouveau
+    # garder seulement le nouveau (df.index is CLOSE timestamp already)
     if last_ts is not None:
         df = df[df.index > pd.Timestamp(last_ts)]
 
@@ -214,8 +234,15 @@ def backfill_if_needed(pair_ticker, pair_short, tf, fetch_fn, target, chunk_td: 
     if oldest is None:
         return False  # nothing to backfill yet (no bootstrap)
 
-    end_dt = pd.Timestamp(oldest).to_pydatetime()
-    start_dt = end_dt - chunk_td
+    delta = _tf_delta(tf)
+
+    # oldest in DB is CLOSE timestamp. Polygon needs OPEN.
+    # To fetch candles that CLOSE before `oldest`, we must end at (oldest_close - delta) in OPEN-time.
+    end_dt = (pd.Timestamp(oldest) - delta).to_pydatetime()
+    start_dt = (pd.Timestamp(end_dt) - chunk_td).to_pydatetime()
+
+    if pd.Timestamp(end_dt) <= pd.Timestamp(start_dt):
+        return False
 
     df = fetch_fn(pair_ticker, start_dt, end_dt)
     if df is None or df.empty:
@@ -369,7 +396,7 @@ def run_once(universe):
         try:
             new15, _ = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
             sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=KEEP_1H)
-            
+
             if not DATA_ONLY and not new15:
                 out["pairs"][pair_short]["actions"].append("no_new_15m")
                 continue
