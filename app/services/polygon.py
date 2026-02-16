@@ -60,7 +60,7 @@ def _fetch_agg(ticker: str, mult: int, span: str, start, end) -> pd.DataFrame:
     params = {
         "adjusted": "true",
         "sort": "asc",
-        "limit": 50000,   # 🚀 important: let pagination work naturally
+        "limit": 500,   # 🚀 important: let pagination work naturally
         "apiKey": settings.POLYGON_API_KEY,
     }
 
