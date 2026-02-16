@@ -6,16 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import requests
 
-from app.db.neon import query_one, query_all, exec_sql
-from app.db.candles import (
-    get_last_ts,
-    set_last_ts,
-    upsert_candles,
-    trim_candles,
-    get_count,
-    get_oldest_ts,
-    get_newest_ts,
-)
+from app.db.neon import query_one, exec_sql
 from app.services.polygon import fetch_15m_fx, fetch_1h_fx
 from app.services.strategy_client import call_trend_engine
 from app.services.telegram import send_telegram
@@ -26,7 +17,7 @@ log = logging.getLogger("runner")
 # FLAGS
 # ============================================================
 
-# DATA_ONLY=1 => only build/maintain candle cache, no strategy, no positions, no telegram
+# DATA_ONLY=1 => fetch only, no strategy, no positions, no telegram
 DATA_ONLY = os.getenv("DATA_ONLY", "0") == "1"
 
 # ============================================================
@@ -42,18 +33,19 @@ FLOOR_ATR_15_EARLY = 1.35
 
 ATR_LEN_15 = 14
 
-# cache sizes (per pair)
-KEEP_15M = 450
-KEEP_1H = 250
+# ============================================================
+# WINDOWS / PAYLOAD
+# ============================================================
 
-# strategy payload sizes
+# we fetch a bit more than payload to compute ATR/fractals safely
+FETCH_15M_DAYS = 8      # 8 days * 24 * 4 = 768 bars max
+FETCH_1H_DAYS = 14      # 14 days * 24 = 336 bars max
+
 PAYLOAD_15M = 400
 PAYLOAD_1H = 200
 
-# backfill targets (build the base gradually)
-TARGET_15M = 400
-TARGET_1H = 200
-
+MIN_15M = PAYLOAD_15M   # minimal required to run strategy
+MIN_1H = PAYLOAD_1H
 
 # ============================================================
 # HELPERS
@@ -65,42 +57,10 @@ def _utc_now() -> datetime:
 def _fmt_pair(pair: str) -> str:
     return pair.replace("C:", "").strip()
 
-def _load_df_from_neon(pair_short: str, tf: str, limit: int) -> pd.DataFrame:
-    rows = query_all(
-        """
-        SELECT ts, open, high, low, close
-        FROM candles
-        WHERE pair=%s AND tf=%s
-        ORDER BY ts DESC
-        LIMIT %s
-        """,
-        (pair_short, tf, int(limit)),
-    ) or []
-
-    if not rows:
-        return pd.DataFrame(columns=["open", "high", "low", "close"])
-
-    # rows are DESC, we want ASC for indicators/strategy
-    rows = list(reversed(rows))
-
-    df = pd.DataFrame(
-        [{
-            "time": r["ts"],
-            "open": float(r["open"]),
-            "high": float(r["high"]),
-            "low":  float(r["low"]),
-            "close": float(r["close"]),
-        } for r in rows]
-    )
-
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    df = df.set_index("time").sort_index()
-    return df
-
 def _df_to_candles(df: pd.DataFrame) -> list[dict]:
     if df is None or df.empty:
         return []
-    out = []
+    out: list[dict] = []
     for ts, r in df.iterrows():
         out.append({
             "time": ts.isoformat(),
@@ -114,19 +74,43 @@ def _df_to_candles(df: pd.DataFrame) -> list[dict]:
 def _is_http_429(err: Exception) -> bool:
     if isinstance(err, requests.exceptions.HTTPError):
         resp = getattr(err, "response", None)
-        if resp is not None and getattr(resp, "status_code", None) == 429:
-            return True
+        return bool(resp is not None and getattr(resp, "status_code", None) == 429)
     return False
 
-def _tf_delta(tf: str) -> timedelta:
-    # Polygon returns OPEN ts, your polygon.py converts to CLOSE ts (+delta).
-    # DB last_ts/oldest_ts are CLOSE timestamps.
-    if tf == "15m":
-        return timedelta(minutes=15)
-    if tf == "1h":
-        return timedelta(hours=1)
-    return timedelta(0)
+def _is_http_403_plan(err: Exception) -> bool:
+    if isinstance(err, requests.exceptions.HTTPError):
+        resp = getattr(err, "response", None)
+        return bool(resp is not None and getattr(resp, "status_code", None) == 403)
+    return False
 
+def _ensure_utc_index(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    df.index = pd.to_datetime(df.index, utc=True)
+    df = df[~df.index.duplicated(keep="last")].sort_index()
+    return df
+
+def _fetch_last_n(pair_ticker: str, tf: str, n: int, now: datetime) -> pd.DataFrame:
+    """
+    Fetch from Polygon on a rolling window then take last n rows.
+    Your polygon.py already converts OPEN -> CLOSE timestamp.
+    """
+    if tf == "15m":
+        start = now - timedelta(days=FETCH_15M_DAYS)
+        df = fetch_15m_fx(pair_ticker, start, now)
+    elif tf == "1h":
+        start = now - timedelta(days=FETCH_1H_DAYS)
+        df = fetch_1h_fx(pair_ticker, start, now)
+    else:
+        raise ValueError(f"Unsupported tf: {tf}")
+
+    df = _ensure_utc_index(df)
+    if df is None or df.empty:
+        return df
+
+    # take last n
+    return df.tail(int(n))
 
 # ============================================================
 # INDICATORS
@@ -161,80 +145,6 @@ def is_pivot_high(df, i, k):
         return False
     v = df["high"].iloc[i]
     return v > df["high"].iloc[i-k:i].max() and v > df["high"].iloc[i+1:i+k+1].max()
-
-
-# ============================================================
-# CANDLES SYNC (Polygon -> Neon)
-# ============================================================
-
-def _tf_delta(tf: str) -> timedelta:
-    if tf == "15m":
-        return timedelta(minutes=15)
-    if tf == "1h":
-        return timedelta(hours=1)
-    raise ValueError(f"Unsupported tf: {tf}")
-    
-def sync_tf(pair_ticker, pair_short, tf, now, fetch_fn, bootstrap_days, keep):
-    last_ts = get_last_ts(pair_short, tf)
-    newest_db = get_newest_ts(pair_short, tf)
-
-    # 1️⃣ Si candle_state vide mais DB contient déjà des bougies → alignement
-    if last_ts is None and newest_db is not None:
-        last_ts = newest_db
-        set_last_ts(pair_short, tf, newest_db)
-
-    # 2️⃣ Si candle_state est incohérent vs DB → correction
-    if last_ts is not None and newest_db is not None:
-        if pd.Timestamp(last_ts) > pd.Timestamp(newest_db) + pd.Timedelta(minutes=1):
-            last_ts = newest_db
-            set_last_ts(pair_short, tf, newest_db)
-
-    delta = _tf_delta(tf)
-
-    # 3️⃣ Calcul du start OPEN
-    if last_ts is None:
-        # bootstrap initial
-        start_open = now - timedelta(days=bootstrap_days)
-    else:
-        # DB stocke CLOSE → Polygon veut OPEN
-        start_open = pd.Timestamp(last_ts) - delta
-
-    # 4️⃣ Calcul du end OPEN
-    # On ne veut PAS demander une bougie dont la CLOSE serait dans le futur
-    # Donc OPEN <= now - delta
-    end_open = pd.Timestamp(now) - delta
-
-    # Sécurité : si fenêtre invalide
-    if end_open <= pd.Timestamp(start_open):
-        return False, last_ts
-
-    # Conversion python datetime
-    start_dt = start_open.to_pydatetime()
-    end_dt = end_open.to_pydatetime()
-
-    df = fetch_fn(pair_ticker, start_dt, end_dt)
-    if df is None or df.empty:
-        return False, last_ts
-
-    # 5️⃣ Garder uniquement les nouvelles CLOSE
-    if last_ts is not None:
-        df = df[df.index > pd.Timestamp(last_ts)]
-
-    if df.empty:
-        return False, last_ts
-
-    # 6️⃣ Upsert
-    upsert_candles(pair_short, tf, df)
-
-    # 7️⃣ Update last_ts (CLOSE timestamp exact)
-    new_last = df.index[-1].to_pydatetime()
-    set_last_ts(pair_short, tf, new_last)
-
-    # 8️⃣ Trim cache
-    trim_candles(pair_short, tf, keep)
-
-    return True, new_last
-
 
 # ============================================================
 # DB HELPERS (positions)
@@ -296,7 +206,6 @@ def update_trail(pos_id, trail_price, trail_on, last_15m_ts, swing_price, swing_
         ),
     )
 
-
 # ============================================================
 # TRAIL ENGINE (MATCH BACKTEST)
 # ============================================================
@@ -357,7 +266,6 @@ def compute_trail(pos, df15: pd.DataFrame):
 
     return trail_on, float(trail), last_swing, last_swing_ts
 
-
 # ============================================================
 # MAIN ENGINE
 # ============================================================
@@ -371,42 +279,47 @@ def run_once(universe):
         out["pairs"][pair_short] = {"actions": []}
 
         try:
-            new15, _ = sync_tf(pair, pair_short, "15m", now, fetch_15m_fx, bootstrap_days=4, keep=KEEP_15M)
-            sync_tf(pair, pair_short, "1h",  now, fetch_1h_fx,  bootstrap_days=7, keep=KEEP_1H)
-
-            if not DATA_ONLY and not new15:
-                out["pairs"][pair_short]["actions"].append("no_new_15m")
-                continue
-
-            # --- Optional: build base gradually (DATA_ONLY mode) ---
-            if DATA_ONLY:
-                did15 = backfill_if_needed(pair, pair_short, "15m", fetch_15m_fx, target=TARGET_15M, chunk_td=timedelta(days=1))
-                did1h = backfill_if_needed(pair, pair_short, "1h",  fetch_1h_fx,  target=TARGET_1H,  chunk_td=timedelta(days=2))
-                out["pairs"][pair_short]["actions"].append(f"data_only_backfill_15m={did15}")
-                out["pairs"][pair_short]["actions"].append(f"data_only_backfill_1h={did1h}")
-                continue
+            # 1) Fetch last N candles directly from Polygon
+            df15 = _fetch_last_n(pair, "15m", n=max(PAYLOAD_15M, 450), now=now)
+            df1h = _fetch_last_n(pair, "1h",  n=max(PAYLOAD_1H, 250), now=now)
 
         except Exception as e:
-            # if Polygon rate-limited => stop all pairs until next cron
             if _is_http_429(e):
                 log.warning("Polygon 429 hit — stopping run until next cron.")
                 return {"error": "polygon_rate_limited"}
+            if _is_http_403_plan(e):
+                log.error("Polygon 403 plan/timeframe issue.")
+                return {"error": "polygon_forbidden"}
             raise
 
-        # --- Normal mode: run strategy ---
-        df15 = _load_df_from_neon(pair_short, "15m", limit=KEEP_15M)
-        df1h = _load_df_from_neon(pair_short, "1h",  limit=KEEP_1H)
-
-        if df15.empty or df1h.empty:
-            out["pairs"][pair_short]["actions"].append("no_cached_data")
+        if df15 is None or df15.empty or df1h is None or df1h.empty:
+            out["pairs"][pair_short]["actions"].append("no_polygon_data")
             continue
 
+        # 2) If DATA_ONLY => just report latest timestamps
+        if DATA_ONLY:
+            out["pairs"][pair_short]["actions"].append(
+                f"data_only df15={len(df15)} last15={df15.index[-1].isoformat()}"
+            )
+            out["pairs"][pair_short]["actions"].append(
+                f"data_only df1h={len(df1h)} last1h={df1h.index[-1].isoformat()}"
+            )
+            continue
+
+        # 3) Make sure we have enough bars for strategy payload
+        if len(df15) < MIN_15M or len(df1h) < MIN_1H:
+            out["pairs"][pair_short]["actions"].append(
+                f"not_enough_data df15={len(df15)} df1h={len(df1h)}"
+            )
+            continue
+
+        # last closed 15m candle (CLOSE ts)
         last15_ts = df15.index[-1].to_pydatetime()
 
         pos = get_open_position(pair_short)
 
         # ====================================================
-        # MANAGE OPEN POSITION
+        # MANAGE OPEN POSITION (only once per 15m close)
         # ====================================================
         if pos:
             if pos["last_15m_ts"] is not None:
@@ -468,8 +381,9 @@ def run_once(universe):
             continue
 
         # ====================================================
-        # ENTRY
+        # ENTRY (only when new 15m closes)
         # ====================================================
+
         payload = call_trend_engine(
             pair,
             _df_to_candles(df15.tail(PAYLOAD_15M)),
