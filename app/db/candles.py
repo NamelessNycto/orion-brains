@@ -31,17 +31,23 @@ def _to_utc_timestamp(ts: TsLike) -> pd.Timestamp:
     return t.tz_convert("UTC")
 
 
-def _normalize_ts(ts: TsLike, tf: str) -> pd.Timestamp:
+def _normalize_ts(ts: datetime | pd.Timestamp, tf: str) -> pd.Timestamp:
     """
-    Normalize candle timestamps so they land on expected grid:
+    Normalize candle timestamps so they land on the expected grid:
       - 15m => :00/:15/:30/:45
       - 1h  => :00
+    Always returns UTC Timestamp.
     """
-    t = _to_utc_timestamp(ts)
+    t = pd.Timestamp(ts)
+
+    # ensure UTC
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
 
     if tf == "15m":
         return t.floor("15min")
-
     if tf == "1h":
         return t.floor("1H")
 
